@@ -74,8 +74,8 @@ def get_world_rays(images, poses, intrinsics):
         indexing='xy'
     )
 
-    xn = u - cx / fx
-    yn = v - cy / fy 
+    xn = (u - cx) / fx
+    yn = (v - cy) / fy 
 
     d_cam = torch.stack([xn, yn, torch.ones_like(xn)], dim=-1).to(device) # (H, W, 3)
     d_cam = d_cam / torch.norm(d_cam, dim=-1, keepdim=True)
@@ -112,4 +112,13 @@ def get_batch(images, rays_o, rays_d, batch_size):
 rays_o, rays_d = get_world_rays(images, poses, intrinsics)
 batch_rays_o, batch_rays_d, batch_rays_rgb = get_batch(images, rays_o, rays_d, 32)
 
-print(batch_rays_o.shape, batch_rays_d.shape, batch_rays_rgb.shape)
+def get_points_on_ray(batch_rays_o, batch_rays_d, low, high, n_samples):
+    B, num_points = batch_rays_o.shape
+    ray_slices = torch.linspace(low, high, n_samples)
+    points = batch_rays_o.view(B, -1, num_points) + ray_slices.view(1, n_samples, 1) * batch_rays_d.view(B, -1, num_points) # (B, 1, 3) + ((64, 1)@(B, 1, 3))
+
+    return ray_slices, points
+
+_, points = get_points_on_ray(batch_rays_o, batch_rays_d, 2.0, 6.0, 64)
+
+print(points.shape)
