@@ -78,8 +78,8 @@ def get_world_rays(images, poses, intrinsics):
     d_cam = torch.stack([xn, yn, torch.ones_like(xn)], dim=-1).to(device) # (H, W, 3)
     d_cam = d_cam / torch.norm(d_cam, dim=-1, keepdim=True)
 
-    rays_d = torch.zeros((N, H, W, 3))
-    rays_o = torch.zeros((N, H, W, 3))
+    rays_d = torch.zeros((N, H, W, 3), device=device)
+    rays_o = torch.zeros((N, H, W, 3), device=device)
 
     for i in range(N):
         pose = poses[i]
@@ -97,8 +97,8 @@ def get_world_rays(images, poses, intrinsics):
 def get_batch(images, rays_o, rays_d, batch_size):
     # Shape for all is (N, H, W, 3)
     N, H, W, _ = images.shape
-    v, u = torch.randint(0, H, (batch_size,)), torch.randint(0, W, (batch_size,))
-    img_ix = torch.randint(0, N, (batch_size,))
+    v, u = torch.randint(0, H, (batch_size,)).to(device), torch.randint(0, W, (batch_size,)).to(device)
+    img_ix = torch.randint(0, N, (batch_size,), device=device)
     batch_rays_o = rays_o[img_ix, v, u]
     batch_rays_d = rays_d[img_ix, v, u]
     batch_rays_rgb = images[img_ix, v, u]
@@ -107,7 +107,7 @@ def get_batch(images, rays_o, rays_d, batch_size):
 
 def get_points_on_ray(batch_rays_o, batch_rays_d, low, high, n_samples):
     B, num_points = batch_rays_o.shape
-    ray_slices = torch.linspace(low, high, n_samples)
+    ray_slices = torch.linspace(low, high, n_samples, device=device)
     points = batch_rays_o.view(B, -1, num_points) + ray_slices.view(1, n_samples, 1) * batch_rays_d.view(B, -1, num_points) # (B, 1, 3) + ((64, 1)@(B, 1, 3))
 
     return ray_slices, points # (n_samples,), (B, N, 3)
@@ -179,3 +179,17 @@ class MainMLP(nn.Module):
 
         return sigma, feature_vector
 
+
+class ColorMLP(nn.Module):
+    def __init__(self, in_channels, out_channels=128):
+        super().__init__()
+        self.l1 = nn.Linear(in_channels, out_channels)
+        self.relu = nn.ReLU()
+        self.l2 = nn.Linear(out_channels, 3)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x_color, dir_enc):
+        x = torch.cat([x_color, dir_enc], dim=-1)
+        color = self.sigmoid(self.l2(self.relu(self.l1(x))))
+
+        return color
