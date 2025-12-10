@@ -56,8 +56,6 @@ def load_blender_nerf_scene(basedir='nerf/nerf_synthetic/lego/', split='train'):
 
     return torch.tensor(images, device=device), torch.tensor(poses, device=device), intrinsics
 
-images, poses, intrinsics = load_blender_nerf_scene()
-
 def get_world_rays(images, poses, intrinsics):
     H = intrinsics['H']
     W = intrinsics['W']
@@ -107,18 +105,77 @@ def get_batch(images, rays_o, rays_d, batch_size):
 
     return batch_rays_o, batch_rays_d, batch_rays_rgb
 
-
-
-rays_o, rays_d = get_world_rays(images, poses, intrinsics)
-batch_rays_o, batch_rays_d, batch_rays_rgb = get_batch(images, rays_o, rays_d, 32)
-
 def get_points_on_ray(batch_rays_o, batch_rays_d, low, high, n_samples):
     B, num_points = batch_rays_o.shape
     ray_slices = torch.linspace(low, high, n_samples)
     points = batch_rays_o.view(B, -1, num_points) + ray_slices.view(1, n_samples, 1) * batch_rays_d.view(B, -1, num_points) # (B, 1, 3) + ((64, 1)@(B, 1, 3))
 
-    return ray_slices, points
+    return ray_slices, points # (n_samples,), (B, N, 3)
 
-_, points = get_points_on_ray(batch_rays_o, batch_rays_d, 2.0, 6.0, 64)
 
-print(points.shape)
+class PositionalEncoding(nn.Module):
+    def __init__(self, l):
+        super().__init__()
+        self.l = l
+
+    def forward(self, x):
+        B, n_samples, n_points = x.shape
+        
+        k = torch.arange(0, self.l, 1)
+        k = k.view(1, 1, 1, -1) # (1, 1, 1, L)
+
+        freqs = torch.pow(2, k) * torch.pi # (1, 1, 1, L)
+
+        x_new = x.view(B, n_samples, n_points, 1) # (B, N, 3, 1)
+
+        sin_features = torch.sin(freqs * x_new) # (B, N, 3, L)
+        cos_features = torch.cos(freqs * x_new) # (B, N, 3, L)
+
+        sin_features = sin_features.view(B, n_samples, -1) # (B, n_samples, 3L)
+        cos_features = cos_features.view(B, n_samples, -1) # (B, n_samples, 3L)
+
+        out = torch.cat([x, sin_features, cos_features], dim=-1) # (B, n_samples, 3 + 6L)
+
+        return out # (B, n_samples, 3 + 6L)
+
+
+class MainMLP(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.net1 = nn.Sequential(
+            nn.Linear(in_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU(),
+        )
+        self.net2 = nn.Sequential(
+            nn.Linear(out_channels + in_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU()
+        )
+
+        self.sigma = nn.Linear(out_channels, 1)
+
+    
+    def forward(self, x):
+        x_enc = x
+
+        h = self.net1(x_enc)
+        h = torch.cat([x_enc, h], dim=-1)
+        feature_vector = self.net2(h)
+
+
+        sigma = self.sigma(feature_vector)
+
+
+        return sigma, feature_vector
+
