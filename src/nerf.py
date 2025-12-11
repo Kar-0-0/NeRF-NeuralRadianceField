@@ -193,3 +193,24 @@ class ColorMLP(nn.Module):
         color = self.sigmoid(self.l2(self.relu(self.l1(x))))
 
         return color
+    
+
+def volume_renderer(sigma, rgb, t_vals, eps=1e-10):
+    # sigma ---> (B, N, 1)
+    # rgb ---> (B, N, 3)
+    # t_vals ---> (N,)
+
+    dists = t_vals[1:] - t_vals[:-1] # (N-1)
+    last = dists[-1:]
+    dists = torch.cat([dists, last], dim=0) # (N,)
+    dists = dists.view(1, dists.size(0), 1) # (1, N, 1)
+    alpha = 1 - torch.exp(-sigma * dists) # (B, N, 1)
+    T = torch.cumprod(1 - alpha + eps, dim=1)
+    T = torch.cat(
+        [torch.ones_like(T[:, :1, :]), T[:, :-1, :]],
+        dim=1
+    ) # (B, N, 1)
+    weights = T * alpha
+    rgb_map = (weights * rgb).sum(dim=1)
+
+    return rgb_map # (B, 3)
