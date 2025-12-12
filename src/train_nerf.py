@@ -86,7 +86,7 @@ def get_world_rays(images, poses, intrinsics):
         R = pose[:3, :3] # (3, 3)
         o = pose[:3, 3] # (3,)
 
-        d_world = d_cam @ R.T # (H, W, 3)
+        d_world = d_cam @ R.transpose(0, 1) # (H, W, 3)
         d_world = d_world / torch.norm(d_world, dim=-1, keepdim=True)
 
         rays_d[i] = d_world
@@ -112,7 +112,10 @@ def render_image(model, pose, intrinsics, chunk_size=4096):
     H, W = intrinsics['H'], intrinsics['W']
     fx, fy, cx, cy = intrinsics['fx'], intrinsics['fy'], intrinsics['cx'], intrinsics['cy']
 
-    # Rays for single pose
+    # Ensure pose is 4x4 on correct device
+    pose = pose.to(device).view(4, 4)
+
+    # Pixel grid
     u, v = torch.meshgrid(
         torch.arange(H, device=device),
         torch.arange(W, device=device),
@@ -120,30 +123,35 @@ def render_image(model, pose, intrinsics, chunk_size=4096):
     )
     xn = (u - cx) / fx
     yn = (v - cy) / fy
-    d_cam = torch.stack([xn, yn, torch.ones_like(xn)], dim=-1)
+    d_cam = torch.stack([xn, yn, torch.ones_like(xn)], dim=-1)  # (H, W, 3)
     d_cam = d_cam / torch.norm(d_cam, dim=-1, keepdim=True)
 
-    R = pose[:3, :3]
-    o = pose[:3, 3]
-    d_world = d_cam @ R.T
-    d_world = d_world / torch.norm(d_world, dim=-1, keepdim=True)
+    # Camera-to-world
+    R = pose[:3, :3]              # (3, 3)
+    o = pose[:3, 3].flatten()     # (3,)
 
-    rays_d = d_world.view(-1, 3)
-    rays_o = o.expand(H * W, -1)
+    d_cam_flat = d_cam.view(-1, 3)                 # (H*W, 3)
+    d_world_flat = d_cam_flat @ R.transpose(0, 1)  # (H*W, 3)
+    d_world_flat = d_world_flat / torch.norm(d_world_flat, dim=-1, keepdim=True)
 
+    rays_d = d_world_flat                          # (H*W, 3)
+    rays_o = o.unsqueeze(0).expand(H * W, 3)       # (H*W, 3)
+
+    # Chunked rendering
     model.eval()
     rgb_chunks = []
     with torch.no_grad():
         for i in range(0, H * W, chunk_size):
             rays_o_chunk = rays_o[i:i + chunk_size]
             rays_d_chunk = rays_d[i:i + chunk_size]
-            rgb_chunk = model(rays_o_chunk, rays_d_chunk)
+            rgb_chunk = model(rays_o_chunk, rays_d_chunk)  # (chunk, 3)
             rgb_chunks.append(rgb_chunk)
 
     rgb_map = torch.cat(rgb_chunks, dim=0).view(H, W, 3).permute(2, 0, 1)  # (3, H, W)
     rgb_map = rgb_map.clamp(0, 1).cpu()
 
     return rgb_map
+
 
 
 # Model Hyperparameters
@@ -157,7 +165,7 @@ lr = 5e-4
 batch_size = 2048
 
 # Training Hyeprparameters
-epochs = 10_000
+epochs = 20_000
 
 model = NeRF(L_pos, L_dir, in_channels, out_channels)
 model = model.to(device)
@@ -166,10 +174,10 @@ optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 images, poses, intrinsics = load_blender_nerf_scene()
 rays_o, rays_d = get_world_rays(images, poses, intrinsics)
 
-val_poses, _, _ = load_blender_nerf_scene(split='val')
+val_images, val_poses, _ = load_blender_nerf_scene(split='val')
 val_idx = 0
-val_pose = val_poses[val_idx]
-gt_img = images[val_idx].permute(2, 0, 1).cpu()
+val_pose = poses[0].to(device)
+gt_img = images[0].permute(2,0,1).cpu()
 
 for epoch in range(epochs):
     batch_rays_o, batch_rays_d, batch_rays_rgb = get_batch(images, rays_o, rays_d, batch_size)
@@ -196,4 +204,3 @@ for epoch in range(epochs):
         # save grid
         torchvision.utils.save_image(grid, f"comparison_epoch{epoch+1}.png")
         print(f"Saved comparison_epoch{epoch+1}.png")
-
