@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtualenvs / environment files
+.env
+.env.*
+env/
+venv/
+ENV/
+.venv/
+venv.bak/
+.venv.bak/
