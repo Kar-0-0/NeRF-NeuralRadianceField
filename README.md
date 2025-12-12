@@ -1,4 +1,3 @@
-text
 # NeRF from Scratch (PyTorch, Lego Scene)
 
 A from‑scratch implementation of a vanilla Neural Radiance Field (NeRF) trained on the Blender **lego** scene using pure PyTorch and minimal dependencies. The goal is readability and learning, not speed.
