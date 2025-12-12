@@ -3,12 +3,18 @@ import torch.nn as nn
 
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-def get_points_on_ray(batch_rays_o, batch_rays_d, low=2, high=6, n_samples=64):
-    B, num_points = batch_rays_o.shape
-    ray_slices = torch.linspace(low, high, n_samples, device=device)
-    points = batch_rays_o.view(B, -1, num_points) + ray_slices.view(1, n_samples, 1) * batch_rays_d.view(B, -1, num_points) # (B, 1, 3) + ((64, 1)@(B, 1, 3))
 
-    return ray_slices, points # (n_samples,), (B, N, 3)
+def get_points_on_ray(batch_rays_o, batch_rays_d, low=2, high=6, n_samples=128):
+    B, _ = batch_rays_o.shape
+    t_vals = torch.linspace(low, high, n_samples, device=batch_rays_o.device)  # (N,)
+
+    # (B, 1, 3) + (1, N, 1) * (B, 1, 3) -> (B, N, 3)
+    rays_o_exp = batch_rays_o[:, None, :] # (B, 1, 3)
+    rays_d_exp = batch_rays_d[:, None, :] # (B, 1, 3)
+    t_exp = t_vals[None, :, None] # (1, N, 1)
+    points = rays_o_exp + t_exp * rays_d_exp # (B, N, 3)
+
+    return t_vals, points
 
 
 class PositionalEncoding(nn.Module):
@@ -102,12 +108,15 @@ def volume_renderer(sigma, rgb, t_vals, eps=1e-10):
     dists = torch.cat([dists, last], dim=0) # (N,)
     dists = dists.view(1, dists.size(0), 1) # (1, N, 1)
     alpha = 1 - torch.exp(-sigma * dists) # (B, N, 1)
-    T = torch.cumprod(1 - alpha + eps, dim=1)
+    alpha = torch.clamp(alpha, 0.0, 1.0)
+    trans = torch.clamp(1 - alpha, min=0.0)
+    T = torch.cumprod(trans + eps, dim=1)
     T = torch.cat(
         [torch.ones_like(T[:, :1, :]), T[:, :-1, :]],
         dim=1
     ) # (B, N, 1)
     weights = T * alpha
+    weights = torch.clamp(weights, min=0.0)
     rgb_map = (weights * rgb).sum(dim=1)
 
     return rgb_map # (B, 3)
@@ -129,13 +138,53 @@ class NeRF(nn.Module):
     
     def forward(self, batch_rays_o, batch_rays_d):
         t_val, points = get_points_on_ray(batch_rays_o, batch_rays_d) # (N,), (B, N, 3)
-        _, N, _ = points.shape
+        B, N, _ = points.shape
         xyz_enc = self.xyz_enc(points) # (B, N, 3 + 6L)
         sigma, feature_map = self.main_mlp(xyz_enc)
-        dirs = batch_rays_d.unsqueeze(1).repeat(1, N, 1) # (B, 3) ---> (B, N, 3)
+        dirs = batch_rays_d[:, None, :].expand(B, N, 3)
         dir_enc = self.dir_enc(dirs)
         color_inp = torch.cat([dir_enc, feature_map], dim=-1)
         color = self.color_mlp(color_inp)
         rgb_map = volume_renderer(sigma, color, t_val)
 
         return rgb_map # B, 3
+    
+    # in nerf.py, inside NeRF class
+    def debug_single_ray(self, ray_o, ray_d):
+        # 1. sample points along ray
+        t_vals, points = get_points_on_ray(ray_o, ray_d, low=2.0, high=6.0, n_samples=64)
+        # t_vals: (N,), points: (1, N, 3)
+
+        # 2. encode positions
+        xyz_enc = self.xyz_enc(points)                 # (1, N, C_pos)
+        sigma, feat = self.main_mlp(xyz_enc)          # sigma: (1, N, 1), feat: (1, N, F)
+
+        # 3. encode direction (repeat per sample)
+        dirs = ray_d.unsqueeze(1).repeat(1, t_vals.numel(), 1)  # (1, N, 3)
+        dir_enc = self.dir_enc(dirs)                            # (1, N, C_dir)
+
+        color_inp = torch.cat([feat, dir_enc], dim=-1)          # (1, N, F+C_dir)
+        rgb = self.color_mlp(color_inp)                         # (1, N, 3)
+
+        # 4. compute weights using your volume_renderer, but also capture weights
+        # copy of your volume renderer math
+        dists = t_vals[1:] - t_vals[:-1]
+        dists = torch.cat([dists, dists[-1:]], dim=0)           # (N,)
+        dists = dists.view(1, -1, 1)                            # (1, N, 1)
+
+        alpha = 1.0 - torch.exp(-sigma * dists) # (1, N, 1)
+        alpha = torch.clamp(alpha, 0.0, 1.0)
+        trans = torch.clamp(1 - alpha, min=0.0)
+        T = torch.cumprod(trans + 1e-10, dim=1)
+        T = torch.cat(
+            [torch.ones_like(T[:, :1, :]), T[:, :-1, :]],
+            dim=1
+        ) # (B, N, 1)
+        weights = (T * alpha)[0, :, 0]                          # (N,)
+        weights = torch.clamp(weights, min=0.0)
+        return (
+            t_vals.detach().cpu(),
+            weights.detach().cpu(),
+            rgb[0].detach().cpu(),
+            sigma[0, :, 0].detach().cpu(),
+        )
